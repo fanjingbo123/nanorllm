@@ -70,10 +70,10 @@
 创建虚拟环境并安装依赖：
 
 ```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -U pip
-pip install -e ".[dev]"
+conda create -n rllm  python=3.11
+source ~/.bashrc
+conda activate rllm
+
 ```
 
 默认依赖很少：
@@ -83,10 +83,33 @@ pip install -e ".[dev]"
 - `python-dotenv`
 - `pytest`（开发依赖）
 
+```bash
+# 安装
+python -m pip install --upgrade pip
+
+# linux
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 
+# macos
+pip install torch torchvision torchaudio
+
+
+pip install transformers python-dotenv
+pip install pytest
+pip install datasets
+# 验证
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.version.cuda)"
+python -c "import transformers, dotenv, pytest; print(transformers.__version__)"
+```
+
 ### 2. 运行主示例
 
 ```bash
-.venv/bin/python examples/train_math_grpo.py
+# huggingface镜像
+export HF_ENDPOINT=https://hf-mirror.com
+# 验证镜像
+python -c "import os;from huggingface_hub import HfApi;print('endpoint=',os.getenv('HF_ENDPOINT'));print(HfApi()._endpoint)"
+# 运行
+python examples/train_math_grpo.py
 ```
 
 默认配置在 [examples/train_math_grpo.py](/Users/sl/caitian/nanorllm/examples/train_math_grpo.py) 里：
@@ -301,3 +324,15 @@ nanorllm/
 这个仓库的很多思路来自对 [`rllm`](https://github.com/agentica-project/rllm) 的学习和拆解。
 
 感谢 `rllm` 项目把 agentic RL 的关键问题、对象分层和训练主链路做了很有启发性的工程化表达，也给了这个 `nanorllm` 一个很明确的出发点。
+
+
+  - env 给题目（observation=question）→ agent 记一条 Step，并把 question 放进 messages
+  - policy.generate(messages) 生成一段文本、保留每个 token 的 logprob
+  - agent 把这段文本记入 Step，并形成 action（对 env 就是“提交的答案文本”）
+  - env.step(action) 判定是否正确：
+      - 错：给出“答错请重试”的 observation，done=False，reward=0
+      - 对：给出“success”的 observation，done=True，reward=1
+  - agent 记录奖励与终止信息；若未终止，下一轮把反馈作为新的 user 消息继
+    续 generate
+  - 回合结束后，得到 Rollout(trajectory, step_views)；step_views 就是训练端需
+    要的 token 事实

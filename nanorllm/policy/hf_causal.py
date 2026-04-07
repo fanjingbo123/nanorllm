@@ -15,8 +15,12 @@ from nanorllm.utils.util import render_messages
 logger = logging.getLogger(__name__)
 
 
-def load_tokenizer(model_name: str):
-    tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+def load_tokenizer(model_name: str, *, local_files_only: bool = False):
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        use_fast=True,
+        local_files_only=local_files_only,
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
@@ -99,7 +103,7 @@ def _load_model_eagerly(model_name: str) -> torch.nn.Module:
     return model
 
 
-def load_model(model_name: str, device: str):
+def load_model(model_name: str, device: str, *, local_files_only: bool = False):
     if device == "cpu" and platform.system() == "Darwin":
         # Avoid safetensors mmap-backed weights on macOS CPU by
         # materializing the checkpoint into RAM before load_state_dict.
@@ -110,15 +114,108 @@ def load_model(model_name: str, device: str):
             logger.info("No safetensors checkpoint found for %s, falling back to from_pretrained()", model_name)
             pass
 
-    logger.info("Loading model with from_pretrained(): %s", model_name)
-    return AutoModelForCausalLM.from_pretrained(model_name)
+    logger.info(
+        "Loading model with from_pretrained(): %s (local_files_only=%s)",
+        model_name,
+        local_files_only,
+    )
+    return AutoModelForCausalLM.from_pretrained(model_name, local_files_only=local_files_only)
+
+
+def _snapshot_to_local_dir(model_name: str, cache_root: str | None = None) -> Path:
+    """Resolve a local snapshot path for the given repo.
+
+    Behavior:
+    - If `cache_root/models--{org}--{repo}/snapshots/<rev>` exists, reuse it.
+    - Otherwise call `snapshot_download` to materialize a snapshot under the
+      per-repo directory and return the created snapshot path.
+    - If `cache_root` is None, fall back to the default HF cache location.
+    """
+    if cache_root:
+        cache_root = Path(cache_root).expanduser()
+        cache_root.mkdir(parents=True, exist_ok=True)
+        try:
+            org, repo = model_name.split("/", 1)
+        except ValueError:
+            org, repo = ("", model_name)
+        local_repo_dir = cache_root / (f"models--{org}--{repo}" if org else f"models--{repo}")
+        snapshots_dir = local_repo_dir / "snapshots"
+        # Prefer an existing snapshot if available
+        if snapshots_dir.exists():
+            ref_main = local_repo_dir / "refs" / "main"
+            if ref_main.exists():
+                try:
+                    rev = ref_main.read_text(encoding="utf-8").strip()
+                    candidate = snapshots_dir / rev
+                    if candidate.exists():
+                        logger.info("Using existing local snapshot: %s", candidate)
+                        return candidate
+                except Exception:
+                    pass
+            candidates = [p for p in snapshots_dir.iterdir() if p.is_dir()]
+            if candidates:
+                candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                logger.info("Using latest local snapshot: %s", candidates[0])
+                return candidates[0]
+
+        # Fetch a fresh snapshot into the per-repo directory
+        snapshot_path = snapshot_download(
+            repo_id=model_name,
+            local_dir=str(local_repo_dir),
+            repo_type=None,
+            allow_patterns=None,
+        )
+        logger.info("Downloaded snapshot to: %s", snapshot_path)
+        return Path(snapshot_path)
+    else:
+        snapshot_path = snapshot_download(
+            repo_id=model_name,
+            repo_type=None,
+            allow_patterns=None,
+        )
+        logger.info("Downloaded snapshot to default cache: %s", snapshot_path)
+        return Path(snapshot_path)
 
 
 class HFCausalPolicy(BasePolicy):
-    def __init__(self, model_name: str, device: str):
+    def __init__(self, model_name: str, device: str, *, prefer_offline: bool = False, offline_cache_dir: str | None = None):
         super().__init__(model_name=model_name, device=device)
-        self._tokenizer = load_tokenizer(model_name)
-        self._model = load_model(model_name, device)
+        if prefer_offline:
+            logger.info("Prefer-offline loading enabled; snapshotting %s", model_name)
+            local_dir = _snapshot_to_local_dir(model_name, offline_cache_dir)
+            logger.info("Loading tokenizer/model from local snapshot: %s", local_dir)
+            self._tokenizer = load_tokenizer(str(local_dir), local_files_only=True)
+            self._model = load_model(str(local_dir), device, local_files_only=True)
+        else:
+            self._tokenizer = load_tokenizer(model_name)
+            self._model = load_model(model_name, device)
+        # Ensure the model tensors live on the requested device so that
+        # training and generation work when args.device != "cpu".
+        # Note: from_pretrained() loads on CPU by default unless a device_map is used.
+        try:
+            self._model.to(self.device)
+        except Exception as e:
+            logger.error("Failed to move model to device %s: %s", self.device, e)
+            raise
+        
+        # Double-check and fix-up later if something unexpectedly re-created
+        # parameters/buffers on a different device.
+        self._assert_or_relocate_model_device()
+
+    def _assert_or_relocate_model_device(self):
+        try:
+            param_device = next(self._model.parameters()).device
+        except StopIteration:
+            # No parameters (edge case) – assume already fine.
+            return
+        target = torch.device(self.device)
+        if param_device != target:
+            logger.warning(
+                "Model parameters on %s but expected %s; relocating now.",
+                param_device,
+                target,
+            )
+            self._model.to(target)
 
     @property
     def model(self) -> torch.nn.Module:
@@ -154,6 +251,8 @@ class HFCausalPolicy(BasePolicy):
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
     ):
+        # Ensure the model and inputs are colocated
+        self._assert_or_relocate_model_device()
         return self._model(input_ids=input_ids, attention_mask=attention_mask).logits
 
 
@@ -167,6 +266,8 @@ class HFCausalPolicy(BasePolicy):
     
 
     def generate(self, prompt_or_messages: str | list[dict[str, Any]], args):
+        # Ensure model is on the intended device before any forward
+        self._assert_or_relocate_model_device()
         response_ids = []
         response_logprobs = []
         prompt_ids = self.tokenize_messages(prompt_or_messages, add_generation_prompt=True)
