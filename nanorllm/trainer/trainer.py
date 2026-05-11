@@ -126,11 +126,109 @@ def run_train_epoch(
         time.perf_counter() - train_start,
         metrics,
     )
-    trajectories= [rollout.trajectory for rollout in rollouts]
+    trajectories = [rollout.trajectory for rollout in rollouts]
     return {
         "rollouts": rollouts,
         "trajectories": trajectories,
         "samples": samples,
         "batch": batch,
+        "metrics": metrics,
+    }
+
+
+def run_unlearn_epoch(
+    forget_tasks,
+    retain_tasks,
+    rollout_fn,
+    policy,
+    ref_policy,
+    tokenizer,
+    optimizer,
+    args,
+):
+    """One epoch of agentic RL unlearning.
+
+    Collects rollouts from both forget and retain task distributions independently,
+    inverts forget-side rewards for GRPO-based return minimization, and trains with
+    a combined PPO + KL loss where KL regularisation applies only to retain samples.
+    """
+    import torch
+
+    from nanorllm.algos.grpo import build_unlearn_samples_from_rollouts
+    from nanorllm.rollout.collector import execute_tasks
+    from nanorllm.trainer.collate import collate_train_batch
+    from nanorllm.trainer.loss import compute_unlearn_policy_loss
+
+    logger.info(
+        "Starting unlearn epoch: forget_tasks=%s retain_tasks=%s samples_per_task=%s",
+        len(forget_tasks),
+        len(retain_tasks),
+        args.num_samples_per_task,
+    )
+
+    # Collect rollouts from both distributions
+    forget_rollouts = execute_tasks(forget_tasks, args.num_samples_per_task, rollout_fn)
+    logger.info("Collected %s forget rollouts", len(forget_rollouts))
+    retain_rollouts = execute_tasks(retain_tasks, args.num_samples_per_task, rollout_fn)
+    logger.info("Collected %s retain rollouts", len(retain_rollouts))
+
+    samples = build_unlearn_samples_from_rollouts(
+        forget_rollouts, retain_rollouts, policy, args
+    )
+    logger.info("Built %s unlearn train samples for mode=%s", len(samples), args.mode)
+
+    train_start = time.perf_counter()
+    minibatch_metrics = []
+
+    if not samples:
+        metrics = aggregate_train_metrics(minibatch_metrics)
+        logger.info(
+            "Finished unlearn epoch in %.2fs with metrics=%s",
+            time.perf_counter() - train_start,
+            metrics,
+        )
+        return {
+            "forget_rollouts": forget_rollouts,
+            "retain_rollouts": retain_rollouts,
+            "samples": samples,
+            "metrics": metrics,
+        }
+
+    policy.model.train()
+    ref_policy.model.eval()
+    for batch_samples in iter_minibatches(samples, args.train_batch_size):
+        if not batch_samples:
+            continue
+        batch = collate_train_batch(batch_samples, tokenizer, args, device=policy.device)
+        is_retain = torch.tensor(
+            [bool(s.metadata.get("is_retain", False)) for s in batch_samples],
+            device=policy.device,
+        )
+        batch["is_retain"] = is_retain
+
+        optimizer.zero_grad()
+        logits = policy.forward(batch["input_ids"], batch["attention_mask"])
+        ref_logits = ref_policy.forward(batch["input_ids"], batch["attention_mask"])
+        loss = compute_unlearn_policy_loss(logits, ref_logits, batch, args)
+        loss.backward()
+        optimizer.step()
+
+        metric = {
+            "loss": loss.detach(),
+            "advantage": batch["advantages"].detach().mean(),
+            "num_samples": int(batch["advantages"].shape[0]),
+        }
+        minibatch_metrics.append(metric)
+
+    metrics = aggregate_train_metrics(minibatch_metrics)
+    logger.info(
+        "Finished unlearn epoch in %.2fs with metrics=%s",
+        time.perf_counter() - train_start,
+        metrics,
+    )
+    return {
+        "forget_rollouts": forget_rollouts,
+        "retain_rollouts": retain_rollouts,
+        "samples": samples,
         "metrics": metrics,
     }
