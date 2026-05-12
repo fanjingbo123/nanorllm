@@ -56,23 +56,29 @@ def build_unlearn_samples_from_rollouts(
     policy,
     args,
 ):
-    """Build TrainSamples for unlearning: invert forget rewards, retain standard GRPO.
+    """Build TrainSamples for agentic unlearning.
 
-    - forget_rollouts: final_reward inverted so GRPO pushes toward lower original return.
-    - retain_rollouts: standard GRPO with original rewards maintains performance.
-    - Each TrainSample is tagged with metadata['is_retain'] for KL loss filtering.
+    Forget side: absolute advantage = -final_reward (success-only penalty).
+      - Successful forget trajectories (reward=1.0) → advantage = -1 (push away).
+      - Failed forget trajectories (reward=0.0)  → advantage = 0 (no gradient).
+      - No group normalization, no filtering.
+
+    Retain side: standard GRPO Z-score advantage within each task group.
     """
     from nanorllm.trainer.collate import transform_episode_samples, transform_step_samples
 
+    # Forget side: absolute advantage, independent of group composition
     for r in forget_rollouts:
-        r.trajectory.final_reward = -r.trajectory.final_reward
+        r.advantage = -r.trajectory.final_reward
         r.metadata["task_type"] = "forget"
+
+    # Retain side: standard GRPO group-relative advantage
     for r in retain_rollouts:
         r.metadata["task_type"] = "retain"
+    grouped_retain = group_by_task_id(retain_rollouts)
+    training_retain = compute_advantage(grouped_retain)
 
-    all_rollouts = forget_rollouts + retain_rollouts
-    grouped = group_by_task_id(all_rollouts)
-    training_rollouts = compute_advantage(grouped)
+    training_rollouts = forget_rollouts + training_retain
 
     samples = []
     if args.mode == "step":

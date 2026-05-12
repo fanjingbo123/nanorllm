@@ -66,9 +66,11 @@ def run_train_epoch(
     policy,
     tokenizer,
     optimizer,
-    args
+    args,
+    *,
+    show_progress: bool = False,
 ):
-    
+
     logger.info(
         "Starting train epoch: tasks=%s samples_per_task=%s max_steps=%s max_new_tokens=%s",
         len(tasks),
@@ -76,7 +78,7 @@ def run_train_epoch(
         args.max_steps,
         args.max_new_tokens,
     )
-    rollouts = execute_tasks(tasks, args.num_samples_per_task, rollout_fn)
+    rollouts = execute_tasks(tasks, args.num_samples_per_task, rollout_fn, show_progress=show_progress)
     logger.info("Collected %s rollouts", len(rollouts))
     samples = build_samples_from_rollouts(rollouts, policy, args)
     logger.info("Built %s train samples for mode=%s", len(samples), args.mode)
@@ -145,6 +147,8 @@ def run_unlearn_epoch(
     tokenizer,
     optimizer,
     args,
+    *,
+    show_progress: bool = False,
 ):
     """One epoch of agentic RL unlearning.
 
@@ -167,15 +171,30 @@ def run_unlearn_epoch(
     )
 
     # Collect rollouts from both distributions
-    forget_rollouts = execute_tasks(forget_tasks, args.num_samples_per_task, rollout_fn)
+    forget_rollouts = execute_tasks(forget_tasks, args.num_samples_per_task, rollout_fn, show_progress=show_progress)
     logger.info("Collected %s forget rollouts", len(forget_rollouts))
-    retain_rollouts = execute_tasks(retain_tasks, args.num_samples_per_task, rollout_fn)
+    retain_rollouts = execute_tasks(retain_tasks, args.num_samples_per_task, rollout_fn, show_progress=show_progress)
     logger.info("Collected %s retain rollouts", len(retain_rollouts))
 
     samples = build_unlearn_samples_from_rollouts(
         forget_rollouts, retain_rollouts, policy, args
     )
     logger.info("Built %s unlearn train samples for mode=%s", len(samples), args.mode)
+
+    # Precompute ref token logprobs for retain samples on reference device (CPU).
+    # This avoids full-vocab logits transfer and per-batch CPU forward during training.
+    for s in samples:
+        if s.metadata.get("is_retain", False):
+            ids = s.input_ids
+            if ids.shape[0] > args.max_length:
+                ids = ids[-args.max_length:]
+            ref_probs = ref_policy.get_token_logprobs(
+                ids.unsqueeze(0),
+                torch.ones_like(ids).unsqueeze(0),
+                ids.unsqueeze(0),
+                args,
+            )
+            s.metadata["ref_logprobs"] = ref_probs.squeeze(0).cpu()
 
     train_start = time.perf_counter()
     minibatch_metrics = []
@@ -195,7 +214,6 @@ def run_unlearn_epoch(
         }
 
     policy.model.train()
-    ref_policy.model.eval()
     for batch_samples in iter_minibatches(samples, args.train_batch_size):
         if not batch_samples:
             continue
@@ -206,10 +224,23 @@ def run_unlearn_epoch(
         )
         batch["is_retain"] = is_retain
 
+        # Extract precomputed ref_logprobs and pad to batch length
+        ref_list = []
+        batch_len = batch["old_logprobs"].shape[1]
+        for s in batch_samples:
+            rp = s.metadata.get("ref_logprobs")
+            if rp is None:
+                rp = torch.zeros(batch_len)
+            else:
+                pad_len = batch_len - rp.shape[0]
+                if pad_len > 0:
+                    rp = torch.nn.functional.pad(rp, (0, pad_len), value=0.0)
+            ref_list.append(rp)
+        batch["ref_logprobs"] = torch.stack(ref_list, dim=0).to(policy.device)
+
         optimizer.zero_grad()
         logits = policy.forward(batch["input_ids"], batch["attention_mask"])
-        ref_logits = ref_policy.forward(batch["input_ids"], batch["attention_mask"])
-        loss = compute_unlearn_policy_loss(logits, ref_logits, batch, args)
+        loss = compute_unlearn_policy_loss(logits, batch, args)
         loss.backward()
         optimizer.step()
 

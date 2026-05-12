@@ -20,14 +20,15 @@ from nanorllm.policy.hf_causal import HFCausalPolicy
 from nanorllm.policy.reference import ReferencePolicy
 from nanorllm.rewards.math_reward import math_reward
 from nanorllm.rollout.engine import RolloutEngine
-from nanorllm.trainer.trainer import run_unlearn_epoch
+from nanorllm.trainer.trainer import run_train_epoch, run_unlearn_epoch
 from nanorllm.utils.util import rollout_to_viewer_json
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 # --- Presets (same as train_math_grpo.py) ---
 
@@ -72,8 +73,8 @@ Only output the code (no backticks, no explanations).
 @dataclass
 class UnlearnArgs:
     # --- Model ---
-    model_name: str = "smollm2-135m-instruct"
-    device: str = "cpu"
+    model_name: str = "qwen2.5-7b-instruct"
+    device: str = "cuda:0"
 
     # --- PPO / GRPO ---
     clip_eps: float = 0.2
@@ -96,13 +97,19 @@ class UnlearnArgs:
     dataset_limit: int | None = None
 
     # --- Dataset split ---
-    split_mode: str = "ratio"  # "ratio" or "task_ids"
+    split_mode: str = "ratio"
     forget_ratio: float = 0.3
     forget_task_ids: list[str] | None = None
     split_seed: int = 42
 
+    # --- Learning phase ---
+    learning_epochs: int = 5
+
     # --- Unlearn hyperparams ---
-    lambda_kl: float = 0.1
+    lambda_kl: float = 1.0
+
+    # --- UX ---
+    show_progress: bool = True
 
     # --- Offline loading ---
     prefer_offline: bool = True
@@ -113,7 +120,7 @@ class UnlearnArgs:
     eval_after: bool = True
     eval_temperature: float = 0.3
     eval_num_samples_per_task: int = 1
-    eval_limit: int | None = 20
+    eval_limit: int | None = None
 
 
 def _run_eval(tasks, name, engine, agent, env, policy, args):
@@ -138,7 +145,7 @@ def _run_eval(tasks, name, engine, agent, env, policy, args):
         return engine.run_episode(agent, env, policy, task, eval_args)
 
     logger.info("Eval %s: %s tasks", name, len(eval_tasks))
-    eval_rollouts = _exec(eval_tasks, eval_args.num_samples_per_task, _rollout_fn)
+    eval_rollouts = _exec(eval_tasks, eval_args.num_samples_per_task, _rollout_fn, show_progress=args.show_progress)
     metrics = compute_basic_eval_metrics(eval_rollouts)
     logger.info("Eval %s: %s", name, metrics)
     return eval_rollouts, metrics
@@ -234,16 +241,7 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown dataset preset: {args.dataset}")
 
-    # --- Split tasks ---
-    forget_tasks, retain_tasks = split_tasks(tasks, args)
-    logger.info(
-        "Split: forget=%s retain=%s (mode=%s)",
-        len(forget_tasks),
-        len(retain_tasks),
-        args.split_mode,
-    )
-
-    # --- Load policy & reference model ---
+    # --- Load base model ---
     load_start = time.perf_counter()
     resolved_model_name = MODEL_PRESETS.get(str(args.model_name).lower(), args.model_name)
     logger.info("Resolved model_name: %s", resolved_model_name)
@@ -253,8 +251,7 @@ if __name__ == "__main__":
         prefer_offline=args.prefer_offline,
         offline_cache_dir=args.offline_cache_dir,
     )
-    ref_policy = ReferencePolicy(policy)
-    logger.info("Policy + ReferencePolicy loaded in %.2fs", time.perf_counter() - load_start)
+    logger.info("Base policy loaded in %.2fs", time.perf_counter() - load_start)
 
     tokenizer = policy.tokenizer
     optimizer = torch.optim.AdamW(policy.parameters(), lr=args.lr)
@@ -262,12 +259,38 @@ if __name__ == "__main__":
     def rollout_fn(task):
         return engine.run_episode(agent, env, policy, task, args)
 
-    # --- Eval before ---
+    # --- Phase 1: Learning ---
+    logger.info("Starting learning phase: %s epoch(s), %s tasks", args.learning_epochs, len(tasks))
+    for epoch in range(args.learning_epochs):
+        learn_result = run_train_epoch(tasks, rollout_fn, policy, tokenizer, optimizer, args, show_progress=args.show_progress)
+        logger.info("Learning epoch %s/%s: %s", epoch + 1, args.learning_epochs, learn_result["metrics"])
+    logger.info("Learning phase complete")
+
+    # --- Phase 2: Freeze trained model as reference ---
+    ref_policy = ReferencePolicy(
+        policy,
+        prefer_offline=args.prefer_offline,
+        offline_cache_dir=args.offline_cache_dir,
+        device="cpu",
+    )
+    logger.info("Reference policy created from trained model")
+
+    # --- Phase 3: Split tasks ---
+    forget_tasks, retain_tasks = split_tasks(tasks, args)
+    logger.info(
+        "Split: forget=%s retain=%s (mode=%s)",
+        len(forget_tasks),
+        len(retain_tasks),
+        args.split_mode,
+    )
+
+    # --- Phase 4: Eval before unlearning (trained model) ---
     if args.eval_before:
         _run_eval(forget_tasks, "forget-before", engine, agent, env, policy, args)
         _run_eval(retain_tasks, "retain-before", engine, agent, env, policy, args)
 
-    # --- Train ---
+    # --- Phase 5: Unlearning ---
+    unlearn_optimizer = torch.optim.AdamW(policy.parameters(), lr=args.lr)
     train_start = time.perf_counter()
     result = run_unlearn_epoch(
         forget_tasks,
@@ -276,13 +299,14 @@ if __name__ == "__main__":
         policy,
         ref_policy,
         tokenizer,
-        optimizer,
+        unlearn_optimizer,
         args,
+        show_progress=args.show_progress,
     )
-    logger.info("Unlearn run completed in %.2fs", time.perf_counter() - train_start)
-    logger.info("Training metrics: %s", result["metrics"])
+    logger.info("Unlearning completed in %.2fs", time.perf_counter() - train_start)
+    logger.info("Unlearning metrics: %s", result["metrics"])
 
-    # --- Eval after ---
+    # --- Phase 6: Eval after unlearning (unlearned model) ---
     if args.eval_after:
         _run_eval(forget_tasks, "forget-after", engine, agent, env, policy, args)
         _run_eval(retain_tasks, "retain-after", engine, agent, env, policy, args)
