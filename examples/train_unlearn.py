@@ -1,3 +1,4 @@
+import gc
 import json
 import logging
 import sys
@@ -73,7 +74,7 @@ Only output the code (no backticks, no explanations).
 @dataclass
 class UnlearnArgs:
     # --- Model ---
-    model_name: str = "qwen2.5-7b-instruct"
+    model_name: str = "qwen2.5-3b-instruct"
     device: str = "cuda:0"
 
     # --- PPO / GRPO ---
@@ -81,20 +82,20 @@ class UnlearnArgs:
     temperature: float = 0.5
     max_new_tokens: int = 64
     max_steps: int = 5
-    num_samples_per_task: int = 4
+    num_samples_per_task: int = 8
     max_length: int = 1024
     max_turn: int = 5
 
     # --- Training ---
-    lr: float = 1e-5
-    train_batch_size: int = 3
+    lr: float = 1e-6
+    train_batch_size: int = 4
     loss_agg_mode: str = "seq-mean-token-mean"
     mode: str = "step"
 
     # --- Dataset ---
-    dataset: str = "simple-math"
+    dataset: str = "gsm8k-jsonl"
     dataset_path: str | None = None
-    dataset_limit: int | None = None
+    dataset_limit: int | None = 100
 
     # --- Dataset split ---
     split_mode: str = "ratio"
@@ -103,7 +104,7 @@ class UnlearnArgs:
     split_seed: int = 42
 
     # --- Learning phase ---
-    learning_epochs: int = 5
+    learning_epochs: int = 3
 
     # --- Unlearn hyperparams ---
     lambda_kl: float = 1.0
@@ -265,6 +266,11 @@ if __name__ == "__main__":
         learn_result = run_train_epoch(tasks, rollout_fn, policy, tokenizer, optimizer, args, show_progress=args.show_progress)
         logger.info("Learning epoch %s/%s: %s", epoch + 1, args.learning_epochs, learn_result["metrics"])
     logger.info("Learning phase complete")
+
+    # Release learning optimizer state to free GPU memory before loading reference model
+    del optimizer
+    gc.collect()
+    torch.cuda.empty_cache()
 
     # --- Phase 2: Freeze trained model as reference ---
     ref_policy = ReferencePolicy(

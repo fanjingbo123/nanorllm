@@ -104,12 +104,19 @@ def run_train_epoch(
         }
 
     policy.model.train()
-    for batch_samples in iter_minibatches(samples, args.train_batch_size):
+    batch_iter = iter_minibatches(samples, args.train_batch_size)
+    if show_progress:
+        try:
+            from tqdm import tqdm
+            n_batches = (len(samples) + args.train_batch_size - 1) // args.train_batch_size
+            batch_iter = tqdm(batch_iter, total=n_batches, desc="train", unit="batch")
+        except ImportError:
+            pass
+    for batch_samples in batch_iter:
         if batch_samples:
             batch = collate_train_batch(batch_samples, tokenizer, args, device=policy.device)
             optimizer.zero_grad()
 
-            logger.info("Running train step on batch with shape=%s", tuple(batch["input_ids"].shape))
             logits = policy.forward(batch['input_ids'], batch['attention_mask'])
             loss = compute_policy_loss(logits, batch, args)
 
@@ -214,7 +221,15 @@ def run_unlearn_epoch(
         }
 
     policy.model.train()
-    for batch_samples in iter_minibatches(samples, args.train_batch_size):
+    batch_iter = iter_minibatches(samples, args.train_batch_size)
+    if show_progress:
+        try:
+            from tqdm import tqdm
+            n_batches = (len(samples) + args.train_batch_size - 1) // args.train_batch_size
+            batch_iter = tqdm(batch_iter, total=n_batches, desc="unlearn", unit="batch")
+        except ImportError:
+            pass
+    for batch_samples in batch_iter:
         if not batch_samples:
             continue
         batch = collate_train_batch(batch_samples, tokenizer, args, device=policy.device)
