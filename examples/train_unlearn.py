@@ -153,6 +153,31 @@ def _run_eval(tasks, name, engine, agent, env, policy, args):
     return eval_rollouts, metrics
 
 
+def _print_args_table(args: UnlearnArgs) -> None:
+    """Print hyperparameters as a 4-column table via logger."""
+    items = [(f.name, str(getattr(args, f.name))) for f in fields(args)]
+
+    try:
+        from rich.console import Console
+        from rich.table import Table
+
+        table = Table(title="UnlearnArgs", show_header=True, header_style="bold")
+        table.add_column("Param", style="dim")
+        table.add_column("Value")
+        table.add_column("Param", style="dim")
+        table.add_column("Value")
+        for i in range(0, len(items), 2):
+            left, right = items[i], items[i + 1] if i + 1 < len(items) else ("", "")
+            table.add_row(left[0], left[1], right[0], right[1])
+
+        console = Console(width=120)
+        with console.capture() as capture:
+            console.print(table)
+        logger.info("\n%s", capture.get().rstrip())
+    except ImportError:
+        logger.info("UnlearnArgs: %s", args)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Agentic RL Unlearning")
     type_map = {int: int, float: float, str: str, bool: lambda x: x.lower() not in ("0", "false", "no")}
@@ -185,7 +210,7 @@ if __name__ == "__main__":
                 kwargs[f.name] = None
     args = UnlearnArgs(**kwargs)
     logger.info("Initializing unlearn run")
-    logger.info("UnlearnArgs: %s", args)
+    _print_args_table(args)
 
     engine = RolloutEngine()
 
