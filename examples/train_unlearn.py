@@ -1,9 +1,10 @@
+import argparse
 import gc
 import json
 import logging
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -79,15 +80,15 @@ class UnlearnArgs:
 
     # --- PPO / GRPO ---
     clip_eps: float = 0.2
-    temperature: float = 0.5
-    max_new_tokens: int = 64
+    temperature: float = 0.9
+    max_new_tokens: int = 256
     max_steps: int = 5
-    num_samples_per_task: int = 8
+    num_samples_per_task: int = 4
     max_length: int = 1024
     max_turn: int = 5
 
     # --- Training ---
-    lr: float = 1e-6
+    lr: float = 5e-6
     train_batch_size: int = 4
     loss_agg_mode: str = "seq-mean-token-mean"
     mode: str = "step"
@@ -152,9 +153,38 @@ def _run_eval(tasks, name, engine, agent, env, policy, args):
     return eval_rollouts, metrics
 
 
+def _build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description="Agentic RL Unlearning")
+    type_map = {int: int, float: float, str: str, bool: lambda x: x.lower() not in ("0", "false", "no")}
+    for f in fields(UnlearnArgs):
+        flag = "--" + f.name.replace("_", "-")
+        if f.type is bool:
+            p.add_argument(flag, action="store_true", default=f.default, help=f"(default: {f.default})")
+            p.add_argument("--no-" + f.name.replace("_", "-"), dest=f.name, action="store_false", help=f"disable {f.name}")
+        elif f.type == list[str] | None or str(f.type).startswith("list"):
+            p.add_argument(flag, type=str, default=f.default, help=f"comma-separated (default: {f.default})")
+        elif f.type == int | None:
+            p.add_argument(flag, type=int, default=f.default, help=f"(default: {f.default})")
+        else:
+            t = type_map.get(f.type, str)
+            p.add_argument(flag, type=t, default=f.default, help=f"(default: {f.default})")
+    return p
+
+
 if __name__ == "__main__":
+    parser = _build_parser()
+    cli = parser.parse_args()
+    kwargs = {f.name: getattr(cli, f.name) for f in fields(UnlearnArgs)}
+    # Parse comma-separated lists
+    for f in fields(UnlearnArgs):
+        if f.type == list[str] | None or str(f.type).startswith("list"):
+            val = kwargs[f.name]
+            if isinstance(val, str) and val:
+                kwargs[f.name] = [v.strip() for v in val.split(",")]
+            elif isinstance(val, str) and not val:
+                kwargs[f.name] = None
+    args = UnlearnArgs(**kwargs)
     logger.info("Initializing unlearn run")
-    args = UnlearnArgs()
     logger.info("UnlearnArgs: %s", args)
 
     engine = RolloutEngine()
