@@ -1,11 +1,9 @@
-import argparse
 import gc
 import json
 import logging
 import sys
 import time
-from dataclasses import dataclass, fields
-from datetime import datetime
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +22,7 @@ from nanorllm.policy.reference import ReferencePolicy
 from nanorllm.rewards.math_reward import math_reward
 from nanorllm.rollout.engine import RolloutEngine
 from nanorllm.trainer.trainer import run_train_epoch, run_unlearn_epoch
-from nanorllm.utils.util import rollout_to_viewer_json
+from nanorllm.utils.util import build_parser, parse_dataclass, print_args_table, rollout_to_viewer_json, setup_file_logging
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -91,6 +89,7 @@ class UnlearnArgs:
     # --- Training ---
     lr: float = 5e-6
     unlearn_lr: float = 5e-7
+    max_grad_norm: float = 0.1
     train_batch_size: int = 4
     loss_agg_mode: str = "seq-mean-token-mean"
     mode: str = "step"
@@ -155,78 +154,12 @@ def _run_eval(tasks, name, engine, agent, env, policy, args):
     return eval_rollouts, metrics
 
 
-def _setup_file_logging(args: UnlearnArgs) -> None:
-    """Mirror console output to logs/<model>/<dataset>/<timestamp>.log."""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_dir = Path("logs") / args.model_name / args.dataset
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_path = log_dir / f"{ts}.log"
-    fh = logging.FileHandler(log_path)
-    fh.setLevel(logging.INFO)
-    fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
-    logger.addHandler(fh)
-    logger.info("Logging to %s", log_path)
-
-
-def _print_args_table(args: UnlearnArgs) -> None:
-    """Print hyperparameters as a 4-column table via logger."""
-    items = [(f.name, str(getattr(args, f.name))) for f in fields(args)]
-
-    try:
-        from rich.console import Console
-        from rich.table import Table
-
-        table = Table(title="UnlearnArgs", show_header=True, header_style="bold")
-        table.add_column("Param", style="dim")
-        table.add_column("Value")
-        table.add_column("Param", style="dim")
-        table.add_column("Value")
-        for i in range(0, len(items), 2):
-            left, right = items[i], items[i + 1] if i + 1 < len(items) else ("", "")
-            table.add_row(left[0], left[1], right[0], right[1])
-
-        console = Console(width=120)
-        with console.capture() as capture:
-            console.print(table)
-        logger.info("\n%s", capture.get().rstrip())
-    except ImportError:
-        logger.info("UnlearnArgs: %s", args)
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Agentic RL Unlearning")
-    type_map = {int: int, float: float, str: str, bool: lambda x: x.lower() not in ("0", "false", "no")}
-    for f in fields(UnlearnArgs):
-        flag = "--" + f.name.replace("_", "-")
-        if f.type is bool:
-            p.add_argument(flag, action="store_true", default=f.default, help=f"(default: {f.default})")
-            p.add_argument("--no-" + f.name.replace("_", "-"), dest=f.name, action="store_false", help=f"disable {f.name}")
-        elif f.type == list[str] | None or str(f.type).startswith("list"):
-            p.add_argument(flag, type=str, default=f.default, help=f"comma-separated (default: {f.default})")
-        elif f.type == int | None:
-            p.add_argument(flag, type=int, default=f.default, help=f"(default: {f.default})")
-        else:
-            t = type_map.get(f.type, str)
-            p.add_argument(flag, type=t, default=f.default, help=f"(default: {f.default})")
-    return p
-
-
 if __name__ == "__main__":
-    parser = _build_parser()
-    cli = parser.parse_args()
-    kwargs = {f.name: getattr(cli, f.name) for f in fields(UnlearnArgs)}
-    # Parse comma-separated lists
-    for f in fields(UnlearnArgs):
-        if f.type == list[str] | None or str(f.type).startswith("list"):
-            val = kwargs[f.name]
-            if isinstance(val, str) and val:
-                kwargs[f.name] = [v.strip() for v in val.split(",")]
-            elif isinstance(val, str) and not val:
-                kwargs[f.name] = None
-    args = UnlearnArgs(**kwargs)
-    _setup_file_logging(args)
+    parser = build_parser(UnlearnArgs, description="Agentic RL Unlearning")
+    args = parse_dataclass(parser, UnlearnArgs)
+    setup_file_logging(args.model_name, args.dataset, logger)
     logger.info("Initializing unlearn run")
-    _print_args_table(args)
+    print_args_table(args, logger, title="UnlearnArgs")
 
     engine = RolloutEngine()
 
