@@ -5,6 +5,7 @@ import logging
 import sys
 import time
 from dataclasses import dataclass, fields
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -75,7 +76,7 @@ Only output the code (no backticks, no explanations).
 @dataclass
 class UnlearnArgs:
     # --- Model ---
-    model_name: str = "qwen2.5-3b-instruct"
+    model_name: str = "smollm2-135m-instruct"
     device: str = "cuda:0"
 
     # --- PPO / GRPO ---
@@ -94,7 +95,7 @@ class UnlearnArgs:
     mode: str = "step"
 
     # --- Dataset ---
-    dataset: str = "gsm8k-jsonl"
+    dataset: str = "arc-jsonl"
     dataset_path: str | None = None
     dataset_limit: int | None = 100
 
@@ -151,6 +152,19 @@ def _run_eval(tasks, name, engine, agent, env, policy, args):
     metrics = compute_basic_eval_metrics(eval_rollouts)
     logger.info("Eval %s: %s", name, metrics)
     return eval_rollouts, metrics
+
+
+def _setup_file_logging(args: UnlearnArgs) -> None:
+    """Mirror console output to logs/<model>/<dataset>/<timestamp>.log."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_dir = Path("logs") / args.model_name / args.dataset
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"{ts}.log"
+    fh = logging.FileHandler(log_path)
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s"))
+    logger.addHandler(fh)
+    logger.info("Logging to %s", log_path)
 
 
 def _print_args_table(args: UnlearnArgs) -> None:
@@ -211,6 +225,7 @@ if __name__ == "__main__":
     args = UnlearnArgs(**kwargs)
     logger.info("Initializing unlearn run")
     _print_args_table(args)
+    _setup_file_logging(args)
 
     engine = RolloutEngine()
 
