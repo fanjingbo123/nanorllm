@@ -223,9 +223,9 @@ if __name__ == "__main__":
             elif isinstance(val, str) and not val:
                 kwargs[f.name] = None
     args = UnlearnArgs(**kwargs)
+    _setup_file_logging(args)
     logger.info("Initializing unlearn run")
     _print_args_table(args)
-    _setup_file_logging(args)
 
     engine = RolloutEngine()
 
