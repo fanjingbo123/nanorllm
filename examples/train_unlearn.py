@@ -76,7 +76,7 @@ Only output the code (no backticks, no explanations).
 @dataclass
 class UnlearnArgs:
     # --- Model ---
-    model_name: str = "smollm2-135m-instruct"
+    model_name: str = "qwen2.5-3b-instruct"
     device: str = "cuda:0"
 
     # --- PPO / GRPO ---
@@ -84,20 +84,21 @@ class UnlearnArgs:
     temperature: float = 0.9
     max_new_tokens: int = 256
     max_steps: int = 5
-    num_samples_per_task: int = 4
+    num_samples_per_task: int = 6
     max_length: int = 1024
     max_turn: int = 5
 
     # --- Training ---
     lr: float = 5e-6
+    unlearn_lr: float = 5e-7
     train_batch_size: int = 4
     loss_agg_mode: str = "seq-mean-token-mean"
     mode: str = "step"
 
     # --- Dataset ---
-    dataset: str = "arc-jsonl"
+    dataset: str = "gsm8k-jsonl"
     dataset_path: str | None = None
-    dataset_limit: int | None = 100
+    dataset_limit: int | None = 10
 
     # --- Dataset split ---
     split_mode: str = "ratio"
@@ -366,7 +367,7 @@ if __name__ == "__main__":
         _run_eval(retain_tasks, "retain-before", engine, agent, env, policy, args)
 
     # --- Phase 5: Unlearning ---
-    unlearn_optimizer = torch.optim.AdamW(policy.parameters(), lr=args.lr)
+    unlearn_optimizer = torch.optim.AdamW(policy.parameters(), lr=args.unlearn_lr)
     train_start = time.perf_counter()
     result = run_unlearn_epoch(
         forget_tasks,
