@@ -121,6 +121,9 @@ def run_train_epoch(
             loss = compute_policy_loss(logits, batch, args)
 
             loss.backward()
+            gn = getattr(args, "max_grad_norm", 0)
+            if gn > 0:
+                torch.nn.utils.clip_grad_norm_(policy.parameters(), gn)
             optimizer.step()
             metrics = {
                         "loss": loss.detach(),
@@ -257,6 +260,9 @@ def run_unlearn_epoch(
         logits = policy.forward(batch["input_ids"], batch["attention_mask"])
         loss = compute_unlearn_policy_loss(logits, batch, args)
         loss.backward()
+        gn = getattr(args, "max_grad_norm", 0)
+        if gn > 0:
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), gn)
         optimizer.step()
 
         metric = {
