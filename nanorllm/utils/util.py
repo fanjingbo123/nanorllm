@@ -158,7 +158,7 @@ def print_args_table(args, logger: logging.Logger, title: str = "Args") -> None:
             right = items[i + 1] if i + 1 < len(items) else ("", "")
             table.add_row(left[0], left[1], right[0], right[1])
 
-        console = Console(width=120)
+        console = Console(width=120, force_terminal=False)
         with console.capture() as capture:
             console.print(table)
         logger.info("\n%s", capture.get().rstrip())
