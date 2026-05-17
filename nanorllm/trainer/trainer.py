@@ -5,7 +5,8 @@ from nanorllm.algos.grpo import  compute_advantage, group_by_task_id
 from nanorllm.core.trajectory import Rollout
 from nanorllm.trainer.collate import collate_train_batch, transform_episode_samples, transform_step_samples
 from nanorllm.trainer.loss import compute_policy_loss
-from nanorllm.rollout.collector import execute_tasks
+from nanorllm.rollout.collector import _HAS_TQDM, execute_tasks
+from nanorllm.utils.util import log_cuda
 import torch
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,7 @@ def run_train_epoch(
     logger.info("Collected %s rollouts", len(rollouts))
     samples = build_samples_from_rollouts(rollouts, policy, args)
     logger.info("Built %s train samples for mode=%s", len(samples), args.mode)
+    log_cuda("train-samples-built")
     train_start = time.perf_counter()
 
     minibatch_metrics = []
@@ -112,6 +114,7 @@ def run_train_epoch(
         }
 
     policy.model.train()
+    log_cuda("train-loop-start")
     batch_iter = iter_minibatches(samples, args.train_batch_size)
     if show_progress:
         try:
@@ -120,25 +123,36 @@ def run_train_epoch(
             batch_iter = tqdm(batch_iter, total=n_batches, desc="train", unit="batch")
         except ImportError:
             pass
+    batch_idx = 0
     for batch_samples in batch_iter:
         if batch_samples:
             batch = collate_train_batch(batch_samples, tokenizer, args, device=policy.device)
+            if batch_idx == 0:
+                log_cuda("train-batch-0-fwd-before")
             optimizer.zero_grad()
 
             logits = policy.forward(batch['input_ids'], batch['attention_mask'])
             loss = compute_policy_loss(logits, batch, args)
 
             loss.backward()
+            if batch_idx == 0:
+                log_cuda("train-batch-0-bwd-after")
             gn = getattr(args, "max_grad_norm", 0)
             if gn > 0:
                 torch.nn.utils.clip_grad_norm_(policy.parameters(), gn)
             optimizer.step()
+            if batch_idx == 0:
+                log_cuda("train-batch-0-step-after")
+            elif batch_idx % 10 == 0:
+                log_cuda(f"train-step-{batch_idx}")
             metrics = {
                         "loss": loss.detach(),
                         "advantage": batch['advantages'].detach().mean(),
                         "num_samples": int(batch['advantages'].shape[0]),
                     }
             minibatch_metrics.append(metrics)
+            batch_idx += 1
+    log_cuda("train-loop-end")
     metrics = aggregate_train_metrics(minibatch_metrics)
 
     logger.info(
@@ -217,20 +231,31 @@ def run_unlearn_epoch(
     )
     logger.info("Built %s unlearn train samples for mode=%s", len(samples), args.mode)
 
-    # Precompute ref token logprobs for retain samples on reference device (CPU).
-    # This avoids full-vocab logits transfer and per-batch CPU forward during training.
-    for s in samples:
-        if s.metadata.get("is_retain", False):
-            ids = s.input_ids
-            if ids.shape[0] > args.max_length:
-                ids = ids[-args.max_length:]
-            ref_probs = ref_policy.get_token_logprobs(
-                ids.unsqueeze(0),
-                torch.ones_like(ids).unsqueeze(0),
-                ids.unsqueeze(0),
-                args,
-            )
-            s.metadata["ref_logprobs"] = ref_probs.squeeze(0).cpu()
+    # Precompute ref token logprobs for retain samples
+    retain_samples = [s for s in samples if s.metadata.get("is_retain", False)]
+    pbar = None
+    if show_progress and _HAS_TQDM:
+        from tqdm import tqdm
+        pbar = tqdm(total=len(retain_samples), desc="ref-logprobs", unit="sample")
+
+    log_cuda("unlearn-ref-pre")
+    for s in retain_samples:
+        ids = s.input_ids
+        if ids.shape[0] > args.max_length:
+            ids = ids[-args.max_length:]
+        ref_probs = ref_policy.get_token_logprobs(
+            ids.unsqueeze(0),
+            torch.ones_like(ids).unsqueeze(0),
+            ids.unsqueeze(0),
+            args,
+        )
+        s.metadata["ref_logprobs"] = ref_probs.squeeze(0).detach().cpu()
+        if pbar is not None:
+            pbar.update(1)
+    log_cuda("unlearn-ref-post")
+
+    if pbar is not None:
+        pbar.close()
 
     train_start = time.perf_counter()
     minibatch_metrics = []
@@ -250,6 +275,7 @@ def run_unlearn_epoch(
         }
 
     policy.model.train()
+    log_cuda("train-loop-start")
     batch_iter = iter_minibatches(samples, args.train_batch_size)
     if show_progress:
         try:
@@ -258,10 +284,13 @@ def run_unlearn_epoch(
             batch_iter = tqdm(batch_iter, total=n_batches, desc="unlearn", unit="batch")
         except ImportError:
             pass
+    batch_idx = 0
     for batch_samples in batch_iter:
         if not batch_samples:
             continue
         batch = collate_train_batch(batch_samples, tokenizer, args, device=policy.device)
+        if batch_idx == 0:
+            log_cuda("train-batch-0-fwd-before")
         is_retain = torch.tensor(
             [bool(s.metadata.get("is_retain", False)) for s in batch_samples],
             device=policy.device,
@@ -286,10 +315,16 @@ def run_unlearn_epoch(
         logits = policy.forward(batch["input_ids"], batch["attention_mask"])
         loss = compute_unlearn_policy_loss(logits, batch, args)
         loss.backward()
+        if batch_idx == 0:
+            log_cuda("train-batch-0-bwd-after")
         gn = getattr(args, "max_grad_norm", 0)
         if gn > 0:
             torch.nn.utils.clip_grad_norm_(policy.parameters(), gn)
         optimizer.step()
+        if batch_idx == 0:
+            log_cuda("train-batch-0-step-after")
+        elif batch_idx % 10 == 0:
+            log_cuda(f"train-step-{batch_idx}")
 
         metric = {
             "loss": loss.detach(),
@@ -297,7 +332,9 @@ def run_unlearn_epoch(
             "num_samples": int(batch["advantages"].shape[0]),
         }
         minibatch_metrics.append(metric)
+        batch_idx += 1
 
+    log_cuda("train-loop-end")
     metrics = aggregate_train_metrics(minibatch_metrics)
     logger.info(
         "Finished unlearn epoch in %.2fs with metrics=%s",

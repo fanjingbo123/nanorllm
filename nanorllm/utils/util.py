@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import torch
+
 def render_messages(
     messages: list[dict[str, Any]],
     add_generation_prompt: bool = False,
@@ -164,3 +166,18 @@ def print_args_table(args, logger: logging.Logger, title: str = "Args") -> None:
         logger.info("\n%s", capture.get().rstrip())
     except ImportError:
         logger.info("%s: %s", title, args)
+
+
+def log_cuda(tag: str) -> None:
+    logger = logging.getLogger("cuda")
+    if not logger.handlers:
+        return
+    if not torch.cuda.is_available():
+        return
+    logger.info(
+        "%-50s alloc=%7.2fGB  res=%7.2fGB  max_alloc=%7.2fGB",
+        tag,
+        torch.cuda.memory_allocated() / 1024**3,
+        torch.cuda.memory_reserved() / 1024**3,
+        torch.cuda.max_memory_allocated() / 1024**3,
+    )

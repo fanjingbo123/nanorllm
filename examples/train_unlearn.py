@@ -4,6 +4,7 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -22,7 +23,7 @@ from nanorllm.policy.reference import ReferencePolicy
 from nanorllm.rewards.math_reward import math_reward
 from nanorllm.rollout.engine import RolloutEngine
 from nanorllm.trainer.trainer import run_train_epoch, run_unlearn_epoch
-from nanorllm.utils.util import build_parser, parse_dataclass, print_args_table, rollout_to_viewer_json, setup_file_logging
+from nanorllm.utils.util import build_parser, log_cuda, parse_dataclass, print_args_table, rollout_to_viewer_json, setup_file_logging
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -159,6 +160,18 @@ if __name__ == "__main__":
     parser = build_parser(UnlearnArgs, description="Agentic RL Unlearning")
     args = parse_dataclass(parser, UnlearnArgs)
     setup_file_logging(args.model_name, args.dataset, logger)
+    # Separate CUDA memory log file, isolated from main logs
+    cuda_log_dir = Path("logs") / args.model_name / args.dataset
+    cuda_log_dir.mkdir(parents=True, exist_ok=True)
+    cuda_log_path = cuda_log_dir / f"cuda_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    cuda_fh = logging.FileHandler(cuda_log_path)
+    cuda_fh.setLevel(logging.DEBUG)
+    cuda_logger = logging.getLogger("cuda")
+    cuda_logger.handlers.clear()
+    cuda_logger.setLevel(logging.INFO)
+    cuda_logger.addHandler(cuda_fh)
+    cuda_logger.propagate = False
+
     logger.info("Initializing unlearn run")
     print_args_table(args, logger, title="UnlearnArgs")
 
@@ -258,6 +271,7 @@ if __name__ == "__main__":
         offline_cache_dir=args.offline_cache_dir,
     )
     logger.info("Base policy loaded in %.2fs", time.perf_counter() - load_start)
+    log_cuda("model-loaded")
 
     tokenizer = policy.tokenizer
     optimizer = torch.optim.AdamW(policy.parameters(), lr=args.lr)
@@ -271,10 +285,14 @@ if __name__ == "__main__":
     learn_envs = [type(env)(reward_fn=env.reward_fn, max_turn=env.max_turn) for _ in range(total)]
 
     # --- Phase 1: Learning ---
+    log_cuda("learn-start")
     logger.info("Starting learning phase: %s epoch(s), %s tasks", args.learning_epochs, len(tasks))
     for epoch in range(args.learning_epochs):
+        log_cuda(f"learn-epoch-{epoch}-rollout-before")
         learn_result = run_train_epoch(tasks, rollout_fn, policy, tokenizer, optimizer, args, agents=learn_agents, envs=learn_envs, show_progress=args.show_progress)
+        log_cuda(f"learn-epoch-{epoch}-train-after")
         logger.info("Learning epoch %s/%s: %s", epoch + 1, args.learning_epochs, learn_result["metrics"])
+    log_cuda("learn-end")
     logger.info("Learning phase complete")
 
     # Release learning optimizer state to free GPU memory before loading reference model
@@ -287,9 +305,9 @@ if __name__ == "__main__":
         policy,
         prefer_offline=args.prefer_offline,
         offline_cache_dir=args.offline_cache_dir,
-        device="cpu",
     )
     logger.info("Reference policy created from trained model")
+    log_cuda("ref-created")
 
     # --- Phase 3: Split tasks ---
     forget_tasks, retain_tasks = split_tasks(tasks, args)
@@ -299,6 +317,7 @@ if __name__ == "__main__":
         len(retain_tasks),
         args.split_mode,
     )
+    log_cuda("split-done")
 
     # Create separate agent/env lists for forget and retain (split_by_ratio shuffles)
     ft = len(forget_tasks) * args.num_samples_per_task
@@ -310,8 +329,12 @@ if __name__ == "__main__":
 
     # --- Phase 4: Eval before unlearning (trained model) ---
     if args.eval_before:
+        log_cuda("eval-before-start")
         _run_eval(forget_tasks, "forget-before", engine, agent, env, policy, args)
+        log_cuda("eval-before-forget-after")
         _run_eval(retain_tasks, "retain-before", engine, agent, env, policy, args)
+        log_cuda("eval-before-retain-after")
+        log_cuda("eval-before-end")
 
     # --- Phase 5: Unlearning ---
     unlearn_optimizer = torch.optim.AdamW(policy.parameters(), lr=args.unlearn_lr)
@@ -336,8 +359,12 @@ if __name__ == "__main__":
 
     # --- Phase 6: Eval after unlearning (unlearned model) ---
     if args.eval_after:
+        log_cuda("eval-after-start")
         _run_eval(forget_tasks, "forget-after", engine, agent, env, policy, args)
+        log_cuda("eval-after-forget-after")
         _run_eval(retain_tasks, "retain-after", engine, agent, env, policy, args)
+        log_cuda("eval-after-retain-after")
+        log_cuda("eval-after-end")
 
     # --- Export ---
     all_rollouts = result.get("forget_rollouts", []) + result.get("retain_rollouts", [])
@@ -346,3 +373,5 @@ if __name__ == "__main__":
         out_path = Path("docs/exported_trajectories.json")
         out_path.write_text(json.dumps(viewer_data, ensure_ascii=False, indent=2))
         logger.info("Exported viewer data to %s", out_path.resolve())
+
+    log_cuda("script-end")
