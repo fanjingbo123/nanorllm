@@ -311,6 +311,106 @@ class HFCausalPolicy(BasePolicy):
             "prompt_ids": prompt_ids,
         }
 
+    def generate_batch(self, messages_list: list[list[dict[str, Any]]], args) -> list[dict[str, Any]]:
+        self._assert_or_relocate_model_device()
+        pad_id = self._tokenizer.pad_token_id
+        eos_id = self._tokenizer.eos_token_id
+        B = len(messages_list)
+
+        # Tokenize each messages independently — same logic as generate()
+        all_prompt_ids = []
+        for messages in messages_list:
+            ids = self.tokenize_messages(messages, add_generation_prompt=True).view(-1)
+            all_prompt_ids.append(ids)
+
+        # Left-pad so that each sequence only attends to its own prefix
+        max_len = max(ids.shape[0] for ids in all_prompt_ids)
+        input_ids = torch.full((B, max_len), pad_id, dtype=torch.long, device=self.device)
+        attention_mask = torch.zeros((B, max_len), dtype=torch.long, device=self.device)
+        for i, ids in enumerate(all_prompt_ids):
+            pad_len = max_len - ids.shape[0]
+            input_ids[i, pad_len:] = ids
+            attention_mask[i, pad_len:] = 1
+
+        # Explicit position_ids because left-padding shifts token positions;
+        # recomputing every step avoids manual-appending off-by-one errors.
+        position_ids = attention_mask.long().cumsum(-1) - 1
+        position_ids.masked_fill_(attention_mask == 0, 0)
+
+        response_ids = [[] for _ in range(B)]
+        response_logprobs = [[] for _ in range(B)]
+
+        self._model.eval()
+        with torch.no_grad():
+            # --- prefill ---
+            outputs = self._model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                use_cache=True,
+            )
+            logits = outputs.logits[:, -1, :]
+            past_key_values = outputs.past_key_values
+
+            for t in range(args.max_new_tokens):
+                token_ids, token_log_probs = self._sample_token(logits, args.temperature)
+                for i in range(B):
+                    response_ids[i].append(token_ids[i])
+                    response_logprobs[i].append(token_log_probs[i])
+
+                if t == args.max_new_tokens - 1:
+                    break
+
+                attention_mask = torch.cat(
+                    [
+                        attention_mask,
+                        torch.ones(
+                            (B, 1),
+                            dtype=attention_mask.dtype,
+                            device=attention_mask.device,
+                        ),
+                    ],
+                    dim=1,
+                )
+                # Explicit position_ids for every decode step: left-padding means
+                # each sample in the batch has a different effective prompt length;
+                # relying on HF to infer position from cache length would assign
+                # the wrong position to short prompts.
+                next_position_ids = attention_mask.sum(dim=1, keepdim=True) - 1
+
+                outputs = self._model(
+                    input_ids=token_ids,
+                    attention_mask=attention_mask,
+                    position_ids=next_position_ids,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+                logits = outputs.logits[:, -1, :]
+                past_key_values = outputs.past_key_values
+
+        # Post-process: truncate each sequence at first EOS (inclusive), matching generate()
+        results = []
+        for i in range(B):
+            if response_ids[i]:
+                rids = torch.stack(response_ids[i], dim=0).view(-1)
+                rlogprobs = torch.stack(response_logprobs[i], dim=0).view(-1)
+            else:
+                rids = torch.empty(0, dtype=torch.long)
+                rlogprobs = torch.empty(0, dtype=torch.float)
+            eos_positions = (rids == eos_id).nonzero(as_tuple=True)[0]
+            if len(eos_positions) > 0:
+                cut = eos_positions[0].item() + 1
+                rids = rids[:cut]
+                rlogprobs = rlogprobs[:cut]
+            rids = rids.detach().cpu()
+            rlogprobs = rlogprobs.detach().cpu()
+            results.append({
+                "text": self._tokenizer.decode(rids, skip_special_tokens=True),
+                "prompt_ids": all_prompt_ids[i].detach().cpu(),
+                "response_ids": rids,
+                "response_logprobs": rlogprobs,
+            })
+        return results
 
 
 if __name__ == '__main__':

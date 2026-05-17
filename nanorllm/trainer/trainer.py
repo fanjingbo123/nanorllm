@@ -68,8 +68,12 @@ def run_train_epoch(
     optimizer,
     args,
     *,
+    agents=None,
+    envs=None,
     show_progress: bool = False,
 ):
+    if (agents is None) != (envs is None):
+        raise ValueError("agents and envs must be provided together")
 
     logger.info(
         "Starting train epoch: tasks=%s samples_per_task=%s max_steps=%s max_new_tokens=%s",
@@ -78,7 +82,11 @@ def run_train_epoch(
         args.max_steps,
         args.max_new_tokens,
     )
-    rollouts = execute_tasks(tasks, args.num_samples_per_task, rollout_fn, show_progress=show_progress)
+    if agents is not None:
+        from nanorllm.rollout.collector import execute_tasks_batch
+        rollouts = execute_tasks_batch(tasks, args.num_samples_per_task, policy, agents, envs, args, show_progress=show_progress)
+    else:
+        rollouts = execute_tasks(tasks, args.num_samples_per_task, rollout_fn, show_progress=show_progress)
     logger.info("Collected %s rollouts", len(rollouts))
     samples = build_samples_from_rollouts(rollouts, policy, args)
     logger.info("Built %s train samples for mode=%s", len(samples), args.mode)
@@ -158,6 +166,10 @@ def run_unlearn_epoch(
     optimizer,
     args,
     *,
+    forget_agents=None,
+    forget_envs=None,
+    retain_agents=None,
+    retain_envs=None,
     show_progress: bool = False,
 ):
     """One epoch of agentic RL unlearning.
@@ -173,6 +185,11 @@ def run_unlearn_epoch(
     from nanorllm.trainer.collate import collate_train_batch
     from nanorllm.trainer.loss import compute_unlearn_policy_loss
 
+    if (forget_agents is None) != (forget_envs is None):
+        raise ValueError("forget_agents and forget_envs must be provided together")
+    if (retain_agents is None) != (retain_envs is None):
+        raise ValueError("retain_agents and retain_envs must be provided together")
+
     logger.info(
         "Starting unlearn epoch: forget_tasks=%s retain_tasks=%s samples_per_task=%s",
         len(forget_tasks),
@@ -181,9 +198,18 @@ def run_unlearn_epoch(
     )
 
     # Collect rollouts from both distributions
-    forget_rollouts = execute_tasks(forget_tasks, args.num_samples_per_task, rollout_fn, show_progress=show_progress)
+    if forget_agents is not None:
+        from nanorllm.rollout.collector import execute_tasks_batch
+        forget_rollouts = execute_tasks_batch(forget_tasks, args.num_samples_per_task, policy, forget_agents, forget_envs, args, show_progress=show_progress)
+    else:
+        forget_rollouts = execute_tasks(forget_tasks, args.num_samples_per_task, rollout_fn, show_progress=show_progress)
     logger.info("Collected %s forget rollouts", len(forget_rollouts))
-    retain_rollouts = execute_tasks(retain_tasks, args.num_samples_per_task, rollout_fn, show_progress=show_progress)
+
+    if retain_agents is not None:
+        from nanorllm.rollout.collector import execute_tasks_batch
+        retain_rollouts = execute_tasks_batch(retain_tasks, args.num_samples_per_task, policy, retain_agents, retain_envs, args, show_progress=show_progress)
+    else:
+        retain_rollouts = execute_tasks(retain_tasks, args.num_samples_per_task, rollout_fn, show_progress=show_progress)
     logger.info("Collected %s retain rollouts", len(retain_rollouts))
 
     samples = build_unlearn_samples_from_rollouts(

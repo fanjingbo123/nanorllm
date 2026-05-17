@@ -97,7 +97,7 @@ class UnlearnArgs:
     # --- Dataset ---
     dataset: str = "gsm8k-jsonl"
     dataset_path: str | None = None
-    dataset_limit: int | None = 10
+    dataset_limit: int | None = None
 
     # --- Dataset split ---
     split_mode: str = "ratio"
@@ -113,6 +113,7 @@ class UnlearnArgs:
 
     # --- UX ---
     show_progress: bool = True
+    rollout_batch_size: int = 16  # >0 = chunk size; 0 = full batch
 
     # --- Offline loading ---
     prefer_offline: bool = True
@@ -264,10 +265,15 @@ if __name__ == "__main__":
     def rollout_fn(task):
         return engine.run_episode(agent, env, policy, task, args)
 
+    # --- Create agent/env instances for batch rollout ---
+    total = len(tasks) * args.num_samples_per_task
+    learn_agents = [type(agent)(system_prompt=agent.system_prompt) for _ in range(total)]
+    learn_envs = [type(env)(reward_fn=env.reward_fn, max_turn=env.max_turn) for _ in range(total)]
+
     # --- Phase 1: Learning ---
     logger.info("Starting learning phase: %s epoch(s), %s tasks", args.learning_epochs, len(tasks))
     for epoch in range(args.learning_epochs):
-        learn_result = run_train_epoch(tasks, rollout_fn, policy, tokenizer, optimizer, args, show_progress=args.show_progress)
+        learn_result = run_train_epoch(tasks, rollout_fn, policy, tokenizer, optimizer, args, agents=learn_agents, envs=learn_envs, show_progress=args.show_progress)
         logger.info("Learning epoch %s/%s: %s", epoch + 1, args.learning_epochs, learn_result["metrics"])
     logger.info("Learning phase complete")
 
@@ -294,6 +300,14 @@ if __name__ == "__main__":
         args.split_mode,
     )
 
+    # Create separate agent/env lists for forget and retain (split_by_ratio shuffles)
+    ft = len(forget_tasks) * args.num_samples_per_task
+    rt = len(retain_tasks) * args.num_samples_per_task
+    forget_agents = [type(agent)(system_prompt=agent.system_prompt) for _ in range(ft)]
+    forget_envs = [type(env)(reward_fn=env.reward_fn, max_turn=env.max_turn) for _ in range(ft)]
+    retain_agents = [type(agent)(system_prompt=agent.system_prompt) for _ in range(rt)]
+    retain_envs = [type(env)(reward_fn=env.reward_fn, max_turn=env.max_turn) for _ in range(rt)]
+
     # --- Phase 4: Eval before unlearning (trained model) ---
     if args.eval_before:
         _run_eval(forget_tasks, "forget-before", engine, agent, env, policy, args)
@@ -311,6 +325,10 @@ if __name__ == "__main__":
         tokenizer,
         unlearn_optimizer,
         args,
+        forget_agents=forget_agents,
+        forget_envs=forget_envs,
+        retain_agents=retain_agents,
+        retain_envs=retain_envs,
         show_progress=args.show_progress,
     )
     logger.info("Unlearning completed in %.2fs", time.perf_counter() - train_start)

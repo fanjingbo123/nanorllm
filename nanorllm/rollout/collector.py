@@ -50,3 +50,59 @@ def execute_tasks(tasks, num_samples_per_task, rollout_fn, *, show_progress: boo
             rollout_result.timing["rollout_time"] = rollout_time
             rollouts.append(rollout_result)
     return rollouts
+
+
+def execute_tasks_batch(tasks, num_samples_per_task, policy, agents, envs,
+                        args, *, show_progress=False) -> list[Rollout]:
+    """Batch rollout: process tasks in parallel chunks via run_episodes_batch.
+
+    rollout_batch_size controls the chunk size; 0 means full batch.
+    """
+    from nanorllm.rollout.engine import run_episodes_batch
+
+    flat_tasks = [task for task in tasks for _ in range(num_samples_per_task)]
+    total = len(flat_tasks)
+    if total == 0:
+        return []
+
+    if agents is None or envs is None:
+        raise ValueError("agents and envs are required for batch rollout")
+    if len(agents) < total or len(envs) < total:
+        raise ValueError(
+            f"Need {total} agents/envs, got {len(agents)} agents and {len(envs)} envs"
+        )
+
+    raw_bs = getattr(args, "rollout_batch_size", 16)
+    if raw_bs is None:
+        raw_bs = 16
+    if raw_bs == 0:
+        bs = total
+    elif raw_bs > 0:
+        bs = raw_bs
+    else:
+        raise ValueError("rollout_batch_size must be >= 0")
+
+    pbar = None
+    if show_progress and _HAS_TQDM:
+        pbar = tqdm(total=total, desc="rollout", unit="episode")
+
+    all_rollouts = []
+    for start in range(0, total, bs):
+        end = min(start + bs, total)
+        chunk_tasks = flat_tasks[start:end]
+        chunk_agents = agents[start:end]
+        chunk_envs = envs[start:end]
+        if pbar is not None:
+            pbar.set_postfix_str(chunk_tasks[0].get("task_id", ""))
+        rollouts = run_episodes_batch(
+            policy, chunk_agents, chunk_envs, chunk_tasks, args, pbar=pbar,
+        )
+        for i, rollout in enumerate(rollouts):
+            idx = start + i
+            rollout.run_id = f"{flat_tasks[idx].get('task_id', 'task')}_sample{(idx % num_samples_per_task) + 1}"
+            rollout.stats = stats_rollout(rollout)
+        all_rollouts.extend(rollouts)
+
+    if pbar is not None:
+        pbar.close()
+    return all_rollouts
