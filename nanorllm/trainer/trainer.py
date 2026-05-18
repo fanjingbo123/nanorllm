@@ -46,8 +46,8 @@ def aggregate_train_metrics(minibatch_metrics):
 
     for minibatch_metric in minibatch_metrics:
         num_samples = minibatch_metric["num_samples"]
-        weighted_loss_sum += float(minibatch_metric["loss"].item()) * num_samples
-        weighted_advantage_sum += float(minibatch_metric["advantage"].item()) * num_samples
+        weighted_loss_sum += float(minibatch_metric["loss"]) * num_samples
+        weighted_advantage_sum += float(minibatch_metric["advantage"]) * num_samples
         total_samples += num_samples
 
     return {

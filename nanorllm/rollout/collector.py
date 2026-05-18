@@ -2,6 +2,8 @@ import logging
 import time
 from typing import Any
 
+import torch
+
 from nanorllm.core.trajectory import Rollout
 
 try:
@@ -102,6 +104,7 @@ def execute_tasks_batch(tasks, num_samples_per_task, policy, agents, envs,
             rollout.run_id = f"{flat_tasks[idx].get('task_id', 'task')}_sample{(idx % num_samples_per_task) + 1}"
             rollout.stats = stats_rollout(rollout)
         all_rollouts.extend(rollouts)
+        torch.cuda.empty_cache()
 
     if pbar is not None:
         pbar.close()
