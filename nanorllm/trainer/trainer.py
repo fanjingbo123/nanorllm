@@ -146,8 +146,8 @@ def run_train_epoch(
             elif batch_idx % 10 == 0:
                 log_cuda(f"train-step-{batch_idx}")
             metrics = {
-                        "loss": loss.detach(),
-                        "advantage": batch['advantages'].detach().mean(),
+                        "loss": loss.item(),
+                        "advantage": batch['advantages'].mean().item(),
                         "num_samples": int(batch['advantages'].shape[0]),
                     }
             minibatch_metrics.append(metrics)
@@ -257,6 +257,12 @@ def run_unlearn_epoch(
     if pbar is not None:
         pbar.close()
 
+    # ref_logprobs are now saved as CPU tensors in sample metadata;
+    # move ref model off GPU to free ~12GB before training
+    ref_policy.model.to("cpu")
+    torch.cuda.empty_cache()
+    log_cuda("unlearn-ref-release-after")
+
     train_start = time.perf_counter()
     minibatch_metrics = []
 
@@ -327,8 +333,8 @@ def run_unlearn_epoch(
             log_cuda(f"train-step-{batch_idx}")
 
         metric = {
-            "loss": loss.detach(),
-            "advantage": batch["advantages"].detach().mean(),
+            "loss": loss.item(),
+            "advantage": batch["advantages"].mean().item(),
             "num_samples": int(batch["advantages"].shape[0]),
         }
         minibatch_metrics.append(metric)

@@ -130,7 +130,7 @@ class UnlearnArgs:
 
 def _run_eval(tasks, name, engine, agent, env, policy, args):
     """Evaluate policy on a named task subset and log metrics."""
-    from nanorllm.rollout.collector import execute_tasks as _exec
+    from nanorllm.rollout.collector import execute_tasks_batch
 
     if not tasks:
         logger.info("Eval %s: no tasks, skipping", name)
@@ -144,13 +144,19 @@ def _run_eval(tasks, name, engine, agent, env, policy, args):
         num_samples_per_task=args.eval_num_samples_per_task,
         max_turn=args.max_turn,
         max_length=args.max_length,
+        rollout_batch_size=args.rollout_batch_size,
     )
 
-    def _rollout_fn(task):
-        return engine.run_episode(agent, env, policy, task, eval_args)
+    total = len(eval_tasks) * args.eval_num_samples_per_task
+    eval_agents = [type(agent)(system_prompt=agent.system_prompt) for _ in range(total)]
+    eval_envs = [type(env)(reward_fn=env.reward_fn, max_turn=env.max_turn) for _ in range(total)]
 
     logger.info("Eval %s: %s tasks", name, len(eval_tasks))
-    eval_rollouts = _exec(eval_tasks, eval_args.num_samples_per_task, _rollout_fn, show_progress=args.show_progress)
+    eval_rollouts = execute_tasks_batch(
+        eval_tasks, eval_args.num_samples_per_task,
+        policy, eval_agents, eval_envs, eval_args,
+        show_progress=args.show_progress,
+    )
     metrics = compute_basic_eval_metrics(eval_rollouts)
     logger.info("Eval %s: %s", name, metrics)
     return eval_rollouts, metrics

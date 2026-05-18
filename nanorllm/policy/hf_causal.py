@@ -253,7 +253,7 @@ class HFCausalPolicy(BasePolicy):
     ):
         # Ensure the model and inputs are colocated
         self._assert_or_relocate_model_device()
-        return self._model(input_ids=input_ids, attention_mask=attention_mask).logits
+        return self._model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).logits
 
 
     def _sample_token(self, logits: torch.Tensor, temperature: float):
@@ -348,6 +348,7 @@ class HFCausalPolicy(BasePolicy):
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 use_cache=True,
+                logits_to_keep=1,
             )
             logits = outputs.logits[:, -1, :]
             past_key_values = outputs.past_key_values
@@ -384,6 +385,7 @@ class HFCausalPolicy(BasePolicy):
                     position_ids=next_position_ids,
                     past_key_values=past_key_values,
                     use_cache=True,
+                    logits_to_keep=1,
                 )
                 logits = outputs.logits[:, -1, :]
                 past_key_values = outputs.past_key_values
