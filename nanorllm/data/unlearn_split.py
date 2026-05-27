@@ -19,6 +19,17 @@ def split_by_ratio(tasks: list[dict], forget_ratio: float, seed: int = 42) -> tu
     return forget, retain
 
 
+def split_by_subject(tasks: list[dict], forget_subjects: set[str]) -> tuple[list[dict], list[dict]]:
+    """Split by subject field: forget_subjects → forget, rest → retain."""
+    forget = [t for t in tasks if t.get("subject", "") in forget_subjects]
+    retain = [t for t in tasks if t.get("subject", "") not in forget_subjects]
+    if not forget:
+        raise ValueError(f"No tasks found for forget_subjects={forget_subjects}")
+    if not retain:
+        raise ValueError("Retain set is empty")
+    return forget, retain
+
+
 def split_tasks(tasks: list[dict], args) -> tuple[list[dict], list[dict]]:
     """Unified entry: dispatch to split_by_task_ids or split_by_ratio based on args."""
     if args.split_mode == "task_ids":
@@ -28,5 +39,9 @@ def split_tasks(tasks: list[dict], args) -> tuple[list[dict], list[dict]]:
         return split_by_task_ids(tasks, ids)
     elif args.split_mode == "ratio":
         return split_by_ratio(tasks, args.forget_ratio, args.split_seed)
+    elif args.split_mode == "subject":
+        if not args.forget_subjects:
+            raise ValueError("split_mode='subject' requires forget_subjects to be set")
+        return split_by_subject(tasks, set(args.forget_subjects))
     else:
         raise ValueError(f"Unknown split_mode: {args.split_mode}")

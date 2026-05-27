@@ -69,7 +69,7 @@ def build_unlearn_samples_from_rollouts(
 
     # Forget side: absolute advantage, independent of group composition
     for r in forget_rollouts:
-        r.advantage = -r.trajectory.final_reward
+        r.advantage = 0.5 - r.trajectory.final_reward
         r.metadata["task_type"] = "forget"
 
     # Retain side: standard GRPO group-relative advantage

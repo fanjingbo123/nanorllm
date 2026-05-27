@@ -155,6 +155,9 @@ def run_train_epoch(
     log_cuda("train-loop-end")
     metrics = aggregate_train_metrics(minibatch_metrics)
 
+    torch.cuda.empty_cache()
+    log_cuda("train-empty-cache-after")
+
     logger.info(
         "Finished train epoch in %.2fs with metrics=%s",
         time.perf_counter() - train_start,
@@ -342,6 +345,10 @@ def run_unlearn_epoch(
 
     log_cuda("train-loop-end")
     metrics = aggregate_train_metrics(minibatch_metrics)
+
+    torch.cuda.empty_cache()
+    log_cuda("unlearn-empty-cache-after")
+
     logger.info(
         "Finished unlearn epoch in %.2fs with metrics=%s",
         time.perf_counter() - train_start,

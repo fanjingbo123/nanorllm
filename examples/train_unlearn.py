@@ -104,10 +104,18 @@ class UnlearnArgs:
     split_mode: str = "ratio"
     forget_ratio: float = 0.3
     forget_task_ids: list[str] | None = None
+    forget_subjects: list[str] | None = None
     split_seed: int = 42
+
+    # --- MMLU per-subject ---
+    mmlu_per_subject: bool = False
+    mmlu_subject_splits: list[str] | None = None
 
     # --- Learning phase ---
     learning_epochs: int = 3
+
+    # --- Unlearn phase ---
+    unlearn_epochs: int = 1
 
     # --- Unlearn hyperparams ---
     lambda_kl: float = 1.0
@@ -229,23 +237,33 @@ if __name__ == "__main__":
         logger.info("Loaded ARC tasks: count=%s", len(tasks))
     elif dataset_key == "mmlu-jsonl":
         from nanorllm.agents.mcq_agent import MCQAgent
-        from nanorllm.data.mmlu_jsonl import get_mmlu_tasks_from_jsonl
-        from nanorllm.datasets_auto import ensure_local_jsonl
         from nanorllm.envs.mcq_env import MCQEnv
         from nanorllm.rewards.classification_reward import classification_reward
 
         agent = MCQAgent(system_prompt=MCQ_SYSTEM_PROMPT)
         env = MCQEnv(reward_fn=classification_reward, max_turn=args.max_turn)
-        dataset_jsonl = args.dataset_path or str(
-            ensure_local_jsonl(
-                "mmlu-jsonl",
-                cache_root=Path(__file__).resolve().parents[1] / "datasets" / "auto_cache",
-                config="all",
-                split="validation",
+
+        if args.mmlu_per_subject:
+            from nanorllm.data.mmlu_jsonl import get_mmlu_tasks_per_subject
+            splits = args.mmlu_subject_splits or ["validation"]
+            cache_root = Path(__file__).resolve().parents[1] / "datasets" / "auto_cache"
+            tasks = get_mmlu_tasks_per_subject(
+                cache_root=cache_root, splits=splits, limit=args.dataset_limit,
             )
-        )
-        tasks = get_mmlu_tasks_from_jsonl(dataset_jsonl, split="val", limit=args.dataset_limit)
-        logger.info("Loaded MMLU tasks: count=%s", len(tasks))
+            logger.info("Loaded MMLU per-subject tasks: count=%s", len(tasks))
+        else:
+            from nanorllm.data.mmlu_jsonl import get_mmlu_tasks_from_jsonl
+            from nanorllm.datasets_auto import ensure_local_jsonl
+            dataset_jsonl = args.dataset_path or str(
+                ensure_local_jsonl(
+                    "mmlu-jsonl",
+                    cache_root=Path(__file__).resolve().parents[1] / "datasets" / "auto_cache",
+                    config="all",
+                    split="auxiliary_train",
+                )
+            )
+            tasks = get_mmlu_tasks_from_jsonl(dataset_jsonl, split="train", limit=args.dataset_limit)
+            logger.info("Loaded MMLU tasks: count=%s", len(tasks))
     elif dataset_key == "humaneval-jsonl":
         from nanorllm.data.humaneval_jsonl import get_humaneval_tasks_from_jsonl
         from nanorllm.datasets_auto import ensure_local_jsonl
@@ -345,23 +363,24 @@ if __name__ == "__main__":
     # --- Phase 5: Unlearning ---
     unlearn_optimizer = torch.optim.AdamW(policy.parameters(), lr=args.unlearn_lr)
     train_start = time.perf_counter()
-    result = run_unlearn_epoch(
-        forget_tasks,
-        retain_tasks,
-        rollout_fn,
-        policy,
-        ref_policy,
-        tokenizer,
-        unlearn_optimizer,
-        args,
-        forget_agents=forget_agents,
-        forget_envs=forget_envs,
-        retain_agents=retain_agents,
-        retain_envs=retain_envs,
-        show_progress=args.show_progress,
-    )
+    for unlearn_epoch in range(args.unlearn_epochs):
+        result = run_unlearn_epoch(
+            forget_tasks,
+            retain_tasks,
+            rollout_fn,
+            policy,
+            ref_policy,
+            tokenizer,
+            unlearn_optimizer,
+            args,
+            forget_agents=forget_agents,
+            forget_envs=forget_envs,
+            retain_agents=retain_agents,
+            retain_envs=retain_envs,
+            show_progress=args.show_progress,
+        )
+        logger.info("Unlearn epoch %s/%s: %s", unlearn_epoch + 1, args.unlearn_epochs, result["metrics"])
     logger.info("Unlearning completed in %.2fs", time.perf_counter() - train_start)
-    logger.info("Unlearning metrics: %s", result["metrics"])
 
     # --- Phase 6: Eval after unlearning (unlearned model) ---
     if args.eval_after:
