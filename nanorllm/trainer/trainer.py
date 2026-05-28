@@ -241,6 +241,10 @@ def run_unlearn_epoch(
         from tqdm import tqdm
         pbar = tqdm(total=len(retain_samples), desc="ref-logprobs", unit="sample")
 
+    torch.cuda.empty_cache()
+    ref_policy.to(policy.device)
+    torch.cuda.empty_cache()
+    log_cuda("unlearn-ref-moved-to-device")
     log_cuda("unlearn-ref-pre")
     for s in retain_samples:
         ids = s.input_ids
@@ -262,7 +266,7 @@ def run_unlearn_epoch(
 
     # ref_logprobs are now saved as CPU tensors in sample metadata;
     # move ref model off GPU to free ~12GB before training
-    ref_policy.model.to("cpu")
+    ref_policy.to("cpu")
     torch.cuda.empty_cache()
     log_cuda("unlearn-ref-release-after")
 

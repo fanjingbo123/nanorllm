@@ -35,6 +35,15 @@ class ReferencePolicy(BasePolicy):
     def tokenizer(self):
         return self._policy.tokenizer
 
+    @property
+    def device(self) -> str:
+        return self._device
+
+    def to(self, device: str):
+        self._device = device
+        self._policy.model.to(device)
+        return self
+
     def forward(
         self,
         input_ids: torch.Tensor,
