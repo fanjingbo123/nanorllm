@@ -105,6 +105,7 @@ class UnlearnArgs:
     forget_ratio: float = 0.3
     forget_task_ids: list[str] | None = None
     forget_subjects: list[str] | None = None
+    forget_libraries: list[str] | None = None
     split_seed: int = 42
 
     # --- MMLU per-subject ---
@@ -281,6 +282,23 @@ if __name__ == "__main__":
         )
         tasks = get_humaneval_tasks_from_jsonl(dataset_jsonl, split="test", limit=args.dataset_limit)
         logger.info("Loaded HumanEval tasks: count=%s", len(tasks))
+    elif dataset_key == "ds1000-jsonl":
+        from nanorllm.data.ds1000_jsonl import get_ds1000_tasks_from_jsonl
+        from nanorllm.datasets_auto import ensure_local_jsonl
+        from nanorllm.envs.code_eval_env import CodeEvalEnv
+        from nanorllm.rewards.code_eval_reward import code_eval_reward
+
+        agent = MathAgent(system_prompt=CODE_SYSTEM_PROMPT)
+        env = CodeEvalEnv(reward_fn=code_eval_reward, max_turn=args.max_turn)
+        dataset_jsonl = args.dataset_path or str(
+            ensure_local_jsonl(
+                "ds1000-jsonl",
+                cache_root=Path(__file__).resolve().parents[1] / "datasets" / "auto_cache",
+                split="test",
+            )
+        )
+        tasks = get_ds1000_tasks_from_jsonl(dataset_jsonl, limit=args.dataset_limit)
+        logger.info("Loaded DS-1000 tasks: count=%s", len(tasks))
     else:
         raise ValueError(f"Unknown dataset preset: {args.dataset}")
 

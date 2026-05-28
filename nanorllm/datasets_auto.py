@@ -36,8 +36,9 @@ def _preset_to_hf(preset: str, config: Optional[str], split: Optional[str]) -> T
         # Default split: validation (aka dev).
         return "cais/mmlu", (config or "all"), (split or "validation")
     if p == "humaneval-jsonl":
-        # HumanEval default split is "test"
         return "openai_humaneval", (config or None), (split or "test")
+    if p == "ds1000-jsonl":
+        return "xlangai/DS-1000", None, "test"
     raise ValueError(f"Unsupported preset for auto download: {preset}")
 
 

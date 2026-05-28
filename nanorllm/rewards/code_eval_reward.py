@@ -1,18 +1,23 @@
 from __future__ import annotations
 
-import json
 from nanorllm.core.types import RewardOutput
-from nanorllm.envs.code_eval_env import _run_test_cases, _run_test_code
+from nanorllm.envs.code_eval_env import _run_ds1000, _run_test_cases, _run_test_code
 
 
 def code_eval_reward(task: dict, action, timeout: float = 5.0) -> RewardOutput:
-    """Evaluate Python code against simple test cases, if provided.
-
-    Task shape:
-      {"question": prompt, "entry_point": str, "test_cases": optional list}
-    When no test_cases present, returns reward=0 with metadata reason.
-    """
+    """Evaluate Python code, with DS-1000 code_context taking priority."""
     code = str(action.value or "")
+    code_context = task.get("code_context")
+
+    # DS-1000
+    if isinstance(code_context, str) and code_context.strip():
+        ok, last_error = _run_ds1000(code, code_context, timeout=timeout)
+        return RewardOutput(
+            reward=1.0 if ok else 0.0,
+            is_correct=ok,
+            metadata={"last_error": last_error},
+        )
+
     entry_point = str(task.get("entry_point", "")).strip()
     test_cases = task.get("test_cases")
     test_code = task.get("test")

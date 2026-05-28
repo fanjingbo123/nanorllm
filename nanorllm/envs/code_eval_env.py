@@ -101,6 +101,40 @@ def _run_test_code(code: str, test_code: str, timeout: float = 10.0) -> tuple[bo
         return False, last_err
 
 
+def _run_ds1000(code: str, code_context: str, timeout: float = 30.0) -> tuple[bool, str]:
+    """Execute DS-1000 code_context, call test_execution(code) and optionally test_string(code).
+
+    Does NOT do placeholder replacement — test_execution handles solution insertion internally.
+    """
+    runner = f'''
+import sys
+solution = sys.stdin.read()
+code_context = {code_context!r}
+namespace = {{}}
+exec(code_context, namespace)
+te = namespace.get("test_execution")
+if not callable(te):
+    print("missing test_execution", file=sys.stderr)
+    sys.exit(1)
+te(solution)
+ts = namespace.get("test_string")
+if callable(ts):
+    ts(solution)
+'''
+    with tempfile.TemporaryDirectory() as td:
+        runner_path = Path(td) / "runner.py"
+        runner_path.write_text(runner, encoding="utf-8")
+        proc = subprocess.run(
+            [sys.executable, str(runner_path)],
+            input=code, capture_output=True, text=True,
+            timeout=max(timeout, 30.0),
+            cwd=str(td),
+        )
+        ok = proc.returncode == 0
+        last_error = proc.stderr.strip() or proc.stdout.strip() if not ok else ""
+        return ok, last_error
+
+
 class CodeEvalEnv(BaseEnv):
     def __init__(self, reward_fn, max_turn: int = 3, timeout: float = 5.0):
         self.task = None

@@ -30,6 +30,22 @@ def split_by_subject(tasks: list[dict], forget_subjects: set[str]) -> tuple[list
     return forget, retain
 
 
+def split_by_library(tasks: list[dict], forget_libraries: set[str]) -> tuple[list[dict], list[dict]]:
+    """Split by library field."""
+    if not forget_libraries:
+        raise ValueError("split_mode='library' requires forget_libraries")
+    for t in tasks:
+        if not t.get("library"):
+            raise ValueError(f"Task {t.get('task_id')} has no library field")
+    forget = [t for t in tasks if t["library"] in forget_libraries]
+    retain = [t for t in tasks if t["library"] not in forget_libraries]
+    if not forget:
+        raise ValueError(f"No tasks found for forget_libraries={forget_libraries}")
+    if not retain:
+        raise ValueError("Retain set is empty")
+    return forget, retain
+
+
 def split_tasks(tasks: list[dict], args) -> tuple[list[dict], list[dict]]:
     """Unified entry: dispatch to split_by_task_ids or split_by_ratio based on args."""
     if args.split_mode == "task_ids":
@@ -43,5 +59,9 @@ def split_tasks(tasks: list[dict], args) -> tuple[list[dict], list[dict]]:
         if not args.forget_subjects:
             raise ValueError("split_mode='subject' requires forget_subjects to be set")
         return split_by_subject(tasks, set(args.forget_subjects))
+    elif args.split_mode == "library":
+        if not args.forget_libraries:
+            raise ValueError("split_mode='library' requires forget_libraries to be set")
+        return split_by_library(tasks, set(args.forget_libraries))
     else:
         raise ValueError(f"Unknown split_mode: {args.split_mode}")
